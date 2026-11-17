@@ -3,6 +3,7 @@
 import argparse
 import json
 import sys
+from collections import Counter
 from datetime import date, datetime
 from pathlib import Path
 
@@ -15,24 +16,28 @@ def date_time(value):
 
 
 def summarize(data):
+    if not isinstance(data, dict):
+        raise ValueError('корень JSON должен быть объектом')
     now = date_time(data['as_of'])
     if not isinstance(data['cases'], list):
         raise ValueError('cases должен быть списком')
     results = []
-    seen = set()
+    identifiers = [case.get('id') for case in data['cases'] if isinstance(case, dict) and isinstance(case.get('id'), str) and case['id'].strip()]
+    duplicate_ids = {identifier for identifier, count in Counter(identifiers).items() if count > 1}
     for index, case in enumerate(data['cases'], 1):
         identifier = case.get('id') if isinstance(case, dict) else None
         item = {'id': identifier if isinstance(identifier, str) and identifier.strip() else f'строка {index}', 'priority': 2, 'crm': {}, 'chat': [], 'warnings': [], 'signals': []}
         try:
             if not isinstance(case, dict) or not isinstance(identifier, str) or not identifier.strip():
                 raise ValueError('нет корректного идентификатора')
-            if identifier in seen:
-                raise ValueError('повторный идентификатор')
-            seen.add(identifier)
             crm, chat = case['crm'], case.get('chat', [])
             if not isinstance(crm, dict) or not isinstance(chat, list):
                 raise ValueError('неверный формат CRM или переписки')
             item.update(crm=crm, chat=chat)
+            if identifier in duplicate_ids:
+                item['warnings'].append('Повторный идентификатор: проверить все связанные карточки.')
+            if any(not isinstance(message, dict) or not isinstance(message.get('author'), str) or not message['author'].strip() or not isinstance(message.get('text'), str) or not message['text'].strip() for message in chat):
+                item['warnings'].append('Некорректное сообщение: проверить переписку вручную.')
             kind = case['type']
             if kind == 'onboarding':
                 status = crm['documents']
@@ -107,7 +112,11 @@ def summarize(data):
             if item['warnings']:
                 item['priority'] = min(item['priority'], 2)
         except (KeyError, ValueError, TypeError, OverflowError) as exc:
-            item.update(priority=min(item['priority'], 2), action='Проверить карточку вручную: неполные или некорректные данные.', warnings=item['warnings'] + [f'Ошибка данных: {exc}'])
+            previous_action = item.get('action')
+            action = 'Проверить карточку вручную: неполные или некорректные данные.'
+            if item['priority'] == 1 and previous_action:
+                action += ' ' + previous_action
+            item.update(priority=min(item['priority'], 2), action=action, warnings=item['warnings'] + [f'Ошибка данных: {exc}'])
         results.append(item)
     return sorted(results, key=lambda item: (item['priority'], str(item['id'])))
 

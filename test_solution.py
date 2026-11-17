@@ -1,6 +1,9 @@
 import copy
 import json
 import unittest
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 from solution import summarize, markdown
 
@@ -64,7 +67,7 @@ class SummaryTest(unittest.TestCase):
         out = summarize(data)
         self.assertEqual(len(out), 5)
         self.assertEqual(next(x for x in out if x['id'] == 'С-24')['priority'], 2)
-        self.assertTrue(any('повторный' in str(x['warnings']) for x in out))
+        self.assertTrue(all(x['priority'] <= 2 and 'Повторный' in str(x['warnings']) for x in out if x['id'] == 'С-17'))
 
     def test_chat_delay_detected_before_deadline(self):
         data = copy.deepcopy(EXAMPLE)
@@ -96,6 +99,36 @@ class SummaryTest(unittest.TestCase):
         data = copy.deepcopy(EXAMPLE)
         del data['cases'][3]['id']
         self.assertEqual(next(x for x in summarize(data) if x['id'] == 'строка 4')['priority'], 2)
+
+    def test_duplicate_closed_case_cannot_appear_cleared(self):
+        data = copy.deepcopy(EXAMPLE)
+        data['cases'].append(copy.deepcopy(data['cases'][3]))
+        duplicates = [x for x in summarize(data) if x['id'] == 'П-09']
+        self.assertEqual([x['priority'] for x in duplicates], [2, 2])
+
+    def test_invalid_chat_is_visible_even_without_signal(self):
+        data = copy.deepcopy(EXAMPLE)
+        data['cases'][3]['chat'] = [{'author': 'получатель'}]
+        item = next(x for x in summarize(data) if x['id'] == 'П-09')
+        self.assertEqual(item['priority'], 2)
+        self.assertIn('Некорректное сообщение', item['warnings'][0])
+
+    def test_urgent_action_survives_secondary_error(self):
+        data = copy.deepcopy(EXAMPLE)
+        data['cases'][2]['signals'][0]['message_index'] = 999
+        item = next(x for x in summarize(data) if x['id'] == 'П-08')
+        self.assertEqual(item['priority'], 1)
+        self.assertIn('курьера', item['action'])
+
+    def test_cli_rejects_invalid_root_without_traceback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'invalid.json'
+            path.write_text('[]')
+            run = subprocess.run([sys.executable, str(Path(__file__).parent / 'solution.py'), str(path)], capture_output=True, text=True)
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn('корень JSON', run.stderr)
+        self.assertNotIn('Traceback', run.stderr)
+        self.assertEqual(run.stdout, '')
 
     def test_naive_clock_rejected(self):
         data = copy.deepcopy(EXAMPLE)

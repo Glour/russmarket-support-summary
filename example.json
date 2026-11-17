@@ -44,14 +44,21 @@
           "text": "Задерживаюсь, раньше 13:00 не приеду"
         }
       ],
-      "crm_updated_at": "2026-11-16T09:55:00+03:00"
+      "crm_updated_at": "2026-11-16T09:55:00+03:00",
+      "signals": [
+        {
+          "type": "delivery_not_before",
+          "not_before": "2026-11-16T13:00:00+03:00",
+          "message_index": 0
+        }
+      ]
     },
     {
       "id": "П-09",
       "type": "delivery",
       "crm": {
         "status": "accepted",
-        "accepted_at": "2026-11-16T09:20:00"
+        "accepted_at": "2026-11-16T09:20:00+03:00"
       },
       "chat": [
         {

@@ -3,7 +3,7 @@
 import argparse
 import json
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 
@@ -21,8 +21,8 @@ def summarize(data):
     results = []
     seen = set()
     for index, case in enumerate(data['cases'], 1):
-        identifier = case.get('id', f'строка {index}') if isinstance(case, dict) else f'строка {index}'
-        item = {'id': identifier, 'priority': 2, 'crm': {}, 'chat': [], 'warnings': []}
+        identifier = case.get('id') if isinstance(case, dict) else None
+        item = {'id': identifier if isinstance(identifier, str) and identifier.strip() else f'строка {index}', 'priority': 2, 'crm': {}, 'chat': [], 'warnings': [], 'signals': []}
         try:
             if not isinstance(case, dict) or not isinstance(identifier, str) or not identifier.strip():
                 raise ValueError('нет корректного идентификатора')
@@ -39,7 +39,7 @@ def summarize(data):
                 if status not in ('pending', 'received'):
                     raise ValueError('неизвестный статус документов')
                 if status == 'pending':
-                    start = datetime.fromisoformat(crm['first_shift']).date()
+                    start = date.fromisoformat(crm['first_shift'])
                     item.update(priority=2 if start <= now.date() else 3, action='Уточнить получение и передачу документов у руководителя; проверить комплектность и CRM до выхода.')
                 else:
                     item.update(priority=4, action='Документы получены по CRM; остальные условия выхода проверить по регламенту.')
@@ -48,7 +48,7 @@ def summarize(data):
                 if type(confirmed) is not bool:
                     raise ValueError('подтверждение руководителя должно быть true или false')
                 if not confirmed:
-                    last_day = datetime.fromisoformat(crm['last_working_day']).date()
+                    last_day = date.fromisoformat(crm['last_working_day'])
                     item.update(priority=1 if last_day <= now.date() else 3, action='Получить подтверждение ответственного руководителя и зафиксировать его по регламенту.')
                 else:
                     item.update(priority=4, action='Подтверждение есть в CRM; остальные условия увольнения проверить по регламенту.')
@@ -57,6 +57,9 @@ def summarize(data):
                 if status not in ('in_transit', 'accepted'):
                     raise ValueError('неизвестный статус доставки')
                 if status == 'accepted':
+                    accepted_at = date_time(crm['accepted_at'])
+                    if accepted_at > now:
+                        raise ValueError('приёмка указана в будущем')
                     item.update(priority=4, action='Приёмка в CRM подтверждена; дополнительных действий по доставке не требуется при отсутствии расхождений.')
                 elif date_time(crm['deadline']) <= now:
                     item.update(priority=1, action='Уточнить срок у курьера, предупредить получателя и проверить факт приёмки.')
@@ -64,6 +67,29 @@ def summarize(data):
                     item.update(priority=3, action='Следить за доставкой и проверить статус к сроку.')
             else:
                 raise ValueError('неизвестный тип операции')
+            # Structured signals are claims from chat, never CRM updates.
+            signals = case.get('signals', [])
+            if not isinstance(signals, list):
+                raise ValueError('signals должен быть списком')
+            for signal in signals:
+                if not isinstance(signal, dict) or signal.get('type') != 'delivery_not_before' or kind != 'delivery':
+                    raise ValueError('неизвестный или неподходящий сигнал переписки')
+                index_ref = signal.get('message_index')
+                if type(index_ref) is not int or not 0 <= index_ref < len(chat):
+                    raise ValueError('сигнал не связан с сообщением')
+                message = chat[index_ref]
+                if not isinstance(message, dict) or message.get('author') != 'курьер' or not isinstance(message.get('text'), str) or not message['text'].strip():
+                    raise ValueError('источник сигнала курьера нужно проверить вручную')
+                not_before = date_time(signal['not_before'])
+                deadline = date_time(crm['deadline'])
+                item['signals'].append({'type': 'delivery_not_before', 'not_before': signal['not_before'], 'message_index': index_ref})
+                if not_before > deadline and crm['status'] == 'in_transit':
+                    item['priority'] = 1
+                    item['action'] = 'Уточнить у курьера риск срыва срока, предупредить получателя и проверить факт приёмки.'
+                    item['warnings'].append('Курьер сообщил время не раньше срока CRM; сообщение требует проверки, это не новый подтверждённый срок.')
+                elif not_before > deadline and crm['status'] == 'accepted':
+                    item['priority'] = min(item['priority'], 2)
+                    item['warnings'].append('Приёмка и сообщение о задержке требуют сверки хронологии.')
             if case.get('conflict_requires_review', False) is True:
                 item['priority'] = min(item['priority'], 2)
                 item['warnings'].append('Отмечено противоречие источников: сверить вручную.')
@@ -81,15 +107,32 @@ def summarize(data):
             if item['warnings']:
                 item['priority'] = min(item['priority'], 2)
         except (KeyError, ValueError, TypeError, OverflowError) as exc:
-            item.update(priority=2, action='Проверить карточку вручную: неполные или некорректные данные.', warnings=[f'Ошибка данных: {exc}'])
+            item.update(priority=min(item['priority'], 2), action='Проверить карточку вручную: неполные или некорректные данные.', warnings=item['warnings'] + [f'Ошибка данных: {exc}'])
         results.append(item)
     return sorted(results, key=lambda item: (item['priority'], str(item['id'])))
+
+
+def crm_readable(crm):
+    labels = {'first_shift': 'первый выход', 'documents': 'документы',
+              'last_working_day': 'последний рабочий день', 'manager_confirmed': 'подтверждение руководителя',
+              'deadline': 'срок доставки', 'status': 'статус доставки', 'accepted_at': 'время приёмки'}
+    values = {'pending': 'ожидаются', 'received': 'получены', 'in_transit': 'в пути', 'accepted': 'принято'}
+    parts = []
+    for key, value in crm.items():
+        if type(value) is bool:
+            display = 'есть' if value else 'отсутствует'
+        elif isinstance(value, str):
+            display = values.get(value, value)
+        else:
+            display = str(value)
+        parts.append(f'{labels.get(key, key)}: {display}')
+    return '; '.join(parts) or 'нет корректных данных'
 
 
 def markdown(data, items):
     lines = [f"# Сводка support на {data['as_of']}", '', 'Приоритет: 1 — срочно; 2 — ручная проверка; 3 — в работу; 4 — контроль.', '']
     for item in items:
-        lines.extend([f"## {item['id']} · приоритет {item['priority']}", '', f"**CRM:** {json.dumps(item['crm'], ensure_ascii=False)}", '', '**Переписка:**'])
+        lines.extend([f"## {item['id']} · приоритет {item['priority']}", '', f"**CRM:** {crm_readable(item['crm'])}", '', '**Переписка:**'])
         if item['chat']:
             for msg in item['chat']:
                 if isinstance(msg, dict):
@@ -98,6 +141,8 @@ def markdown(data, items):
                     lines.append('- Некорректное сообщение: проверить источник вручную.')
         else:
             lines.append('- Нет сообщений в предоставленных данных.')
+        for signal in item['signals']:
+            lines.append(f"- Сигнал из сообщения №{signal['message_index'] + 1}: не раньше {signal['not_before']} (проверить по источнику).")
         lines.extend(['', f"**Действие:** {item['action']}"])
         for warning in item['warnings']:
             lines.append(f'**Проверить:** {warning}')

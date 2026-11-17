@@ -18,6 +18,7 @@ class SummaryTest(unittest.TestCase):
 
     def test_deadline_and_timezones(self):
         data = copy.deepcopy(EXAMPLE)
+        data['cases'][2].pop('signals')
         data['as_of'] = '2026-11-16T06:59:00+00:00'
         self.assertEqual(next(x for x in summarize(data) if x['id'] == 'П-08')['priority'], 3)
         data['as_of'] = '2026-11-16T07:00:00+00:00'
@@ -64,6 +65,37 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(len(out), 5)
         self.assertEqual(next(x for x in out if x['id'] == 'С-24')['priority'], 2)
         self.assertTrue(any('повторный' in str(x['warnings']) for x in out))
+
+    def test_chat_delay_detected_before_deadline(self):
+        data = copy.deepcopy(EXAMPLE)
+        data['as_of'] = '2026-11-16T09:59:00+03:00'
+        item = next(x for x in summarize(data) if x['id'] == 'П-08')
+        self.assertEqual(item['priority'], 1)
+        self.assertIn('не новый подтверждённый срок', item['warnings'][0])
+        self.assertEqual(item['signals'][0]['message_index'], 0)
+
+    def test_invalid_signal_does_not_hide_urgent_case(self):
+        data = copy.deepcopy(EXAMPLE)
+        data['cases'][2]['signals'][0]['message_index'] = 8
+        item = next(x for x in summarize(data) if x['id'] == 'П-08')
+        self.assertEqual(item['priority'], 1)
+        self.assertIn('не связан', item['warnings'][0])
+
+    def test_incomplete_or_future_receipt_needs_review(self):
+        for timestamp in (None, '2026-11-16T11:00:00+03:00'):
+            data = copy.deepcopy(EXAMPLE)
+            if timestamp is None:
+                del data['cases'][3]['crm']['accepted_at']
+            else:
+                data['cases'][3]['crm']['accepted_at'] = timestamp
+            item = next(x for x in summarize(data) if x['id'] == 'П-09')
+            self.assertEqual(item['priority'], 2)
+            self.assertIn('Ошибка данных', item['warnings'][0])
+
+    def test_missing_case_id_requires_review(self):
+        data = copy.deepcopy(EXAMPLE)
+        del data['cases'][3]['id']
+        self.assertEqual(next(x for x in summarize(data) if x['id'] == 'строка 4')['priority'], 2)
 
     def test_naive_clock_rejected(self):
         data = copy.deepcopy(EXAMPLE)
